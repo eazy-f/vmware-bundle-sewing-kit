@@ -17,11 +17,13 @@ from binascii import crc32
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--extracted', help = 'extracted bundle contents directory')
+    parser.add_argument('--patch', help = '<component> <object> <patched_file>', nargs=3, action = 'append', dest = 'patches')
     parser.add_argument('bundle', help = 'vmware installer bundle file')
     args = parser.parse_args()
     bundle_dir = get_bundle_dir(args.bundle, args.extracted)
     add_vmware_libraries(bundle_dir)
-    patched_files = apply_bundle_patch(bundle_dir)
+##    patched_files = apply_bundle_patch(bundle_dir)
+    patched_files = args_patch(args.patches)
     with open(args.bundle, 'rb') as bundle:
         original_descriptor = load_bundle_descriptor(bundle)
         patched_descriptor = patch_bundle_descriptor(original_descriptor, patched_files)
@@ -42,6 +44,9 @@ def apply_bundle_patch(bundle_dir):
         patched.write('ololo\n')
         patched_files.append(('vmware-vmx', vmmon, patched.name))
     return patched_files
+
+def args_patch(patches):
+    return patches
 
 def add_vmware_libraries(bundle_dir):
     sys.path.append(os.path.join(bundle_dir, 'vmware-installer'))
@@ -97,19 +102,21 @@ def get_size_change(file_entry):
         return 0
 
 class PatchedFile(object):
-    def __init__(self, path, uncompressedSize, compressedSize, content):
-        self.content = io.BytesIO()
-        compressor = GzipFile(fileobj = self.content, mode = 'wb')
-        compressor.write(b'0' * 100)
-        compressor.close()
+    def __init__(self, path, uncompressedSize, content):
         self.path = path
         self.uncompressedSize = uncompressedSize
-        self.compressedSize = len(self.content.getvalue())
+        self.compressedSize = len(content.getvalue())
         self.offset = 0
+        self.content = content
 
     @staticmethod
-    def create_from_file(path, content):
-        return PatchedFile(path, 100, 100, StringIO('hello'))
+    def create_from_file(path, fs_path):
+        content = io.BytesIO()
+        with open(fs_path, 'rb') as source:
+            destination = GzipFile(fileobj = content, mode = 'wb')
+            size = copy_data(source, destination)
+            destination.close()
+            return PatchedFile(path, size, content)
 
 def get_patched_entries(patched_files):
     entries_map = {}
@@ -256,6 +263,15 @@ def get_file_bundle(bundle):
             properties['coreVersion'] = component.coreVersion
             for name, value in properties.items():
                 etree.SubElement(root, name).text=value
+            if component.eula:
+                etree.SubElement(root, 'eula').text = component.eula
+            dependencies = etree.SubElement(root, 'dependencies')
+            for dep in component.dependencies:
+                optional = dep.optional
+                dep.optional = False
+                etree.SubElement(dependencies, 'dependency',
+                                 name = str(dep), optional = str(optional).lower())
+                dep.optional = optional
             fileset = etree.SubElement(root, 'fileset')
             for entry in component.fileset.values():
                 props = {
@@ -353,6 +369,7 @@ def copy_data(source, destination, size = None):
     bsize = 1024 * 1024
     b = bytearray('a'*bsize)
     write_bytes = True
+    written = 0
     while write_bytes:
         read_bytes = source.readinto(b)
         if size != None:
@@ -360,7 +377,9 @@ def copy_data(source, destination, size = None):
             size = size - write_bytes
         else:
             write_bytes = read_bytes
-        destination.write(b[0:write_bytes])
+        destination.write(bytes(b[0:write_bytes]))
+        written = written + write_bytes
+    return written
 
 if __name__ == '__main__':
     main()
